@@ -1,0 +1,93 @@
+---
+title: "Preprints"
+format: html
+editor: visual
+---
+
+```{r, echo=FALSE, message=FALSE}
+library(tidyverse)
+library(data.table)
+library(here)
+library(conflicted)
+library(magrittr)
+library(officer)
+
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+
+here()
+
+knitr::opts_chunk$set(
+        message = F,
+        error = F,
+        warning = F,
+        comment = NA,
+        highlight = T,
+        prompt = T
+        )
+```
+
+```{r}
+#Get document names
+path_p <- paste0(here(), "/MQLs-SARS-selected/")
+filenames_p <- list.files(path_p, 
+                        pattern=".*docx")
+#Ensure this deletes any phantom file names because you accidentally have a document open
+filenames_p<-filenames_p[!grepl("~", filenames_p)]
+
+#Create empty data frame
+citations<-c()
+
+#Load and process all files
+for(i in filenames_p){
+    
+  #Create vector with MQL date for later
+    fname<-str_sub(i, start = 1, end = 8)
+    
+  #Open .docx file
+    doc<-officer::read_docx(paste0(path_p, i))
+  
+  #Turn word doc into a data frame                          
+    dsum <- officer::docx_summary(doc) 
+    
+  #Filter to just the citations, ensure unique, make new variable with MQL date
+    dsum %<>% 
+      filter(style_name == "EndNote Bibliography") %>% 
+      select(text) %>% 
+      distinct() %>% 
+      mutate(MQL = fname)
+    
+    citations<-bind_rows(citations, dsum) 
+}
+#Ignore Warning: Undefined namespace prefix
+
+rownames(citations)<-NULL
+
+citations %<>% 
+  mutate_all(fauxnaif::na_if_in, c("", " ", "  ")) %>% 
+  filter(!is.na(text))
+
+citations2<-citations %>% 
+  mutate(text = trimws(str_remove(text, "ADDIN EN.REFLIST"))) %>% 
+  separate_wider_delim(text,
+                       stringr::regex("^[0-9]*\\."),
+                       too_few = "align_end",
+                       too_many = "merge",
+                       names = c("Citation number", 
+                                 "Citation")) %>% 
+  mutate(Citation = trimws(str_remove(Citation, stringr::regex("\\(*U*\\) "))))
+
+citations2 %<>% 
+  select(-"Citation number")
+
+unique<-citations2 %>% 
+  group_by(Citation) %>% 
+  arrange(Citation, MQL) %>% 
+  slice(1)
+
+fwrite(unique, 
+       paste0(here(), "/Data/unique_for_crossref.csv"))
+#Add number column to Excel document
+#Get DOI list from: https://apps.crossref.org/SimpleTextQuery
+
+```
