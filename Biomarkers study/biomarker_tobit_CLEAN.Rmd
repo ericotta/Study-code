@@ -1,0 +1,507 @@
+---
+title: "tobit_biomarker"
+author: "Emily Ricotta"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(broom)
+library(tidyverse)
+library(data.table)
+library(magrittr)
+library(Hmisc)
+library(here)
+library(conflicted)
+library(knitr)
+library(skimr)
+library(ggplot2)
+library(GGally)
+library(AER)
+
+options(tibble.print_max = Inf, tibble.width = Inf, digits=7, scipen=999, max.print=5000)
+knitr::opts_chunk$set(echo = FALSE)
+
+conflict_prefer("describe", "Hmisc")
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+
+here() 
+```
+
+
+```{r load data, include=FALSE}
+df_dat1 <- file.info(list.files(paste0(here(), "/Data"), full.names = T))
+max_dat1<-df_dat1[grepl("dat1", rownames(df_dat1)),]
+max_dat1<-rownames(max_dat1)[which.max(max_dat1$mtime)]
+load(max_dat1)
+
+df_dems <- file.info(list.files(paste0(here(), "/Data"), full.names = T))
+max_dems<-df_dems[grepl("dems", rownames(df_dems)),]
+max_dems<-rownames(max_dems)[which.max(max_dems$mtime)]
+load(max_dems)
+
+```
+
+
+```{r tidy tobit function}
+#From https://stackoverflow.com/questions/76770110/how-to-use-broomtidy-for-tobit-models
+
+tidy.tobit <- function(x, ...) {
+     class(x) <- "survreg"
+     tidy(x, conf.int = TRUE)
+ }
+
+```
+
+```{r regression setup}
+muprots<-c("CTACK", "ENA-78", "Eotaxin", "Eotaxin-2", "Eotaxin-3", 
+           "EPO", "FLT3L", "Fractalkine", "Gro-a", "I-309", 
+           "IFNb", "IFNg", "IL-10", "IL-12/IL-23p40", "IL-13", 
+           "IL-15", "IL-16", "IL-17A/F", "IL-17B", "IL-17E/IL-25", 
+           "IL-17F", "IL-18", "IL-1Ra", "IL-2", "IL-21", 
+           "IL-22", "IL-23", "IL-27", "IL-29", "IL-2Ra", 
+           "IL-3", "IL-31", "IL-33", #"IL-4", 
+           "IL-5", "IL-6", "IL-7", "IL-8", "IL-9", 
+           "IP-10", "I-TAC", "M-CSF", "MCP-1", "MCP-2", 
+           "MCP-4", "MDC", "MIF", "MIP-1a", "MIP-1b", 
+           "MIP-3a", "MIP-3b", "MIP-5", "SDF-1a", "TARC", 
+           "TNFa", "TPO", "TRAIL", "VEGF-A", "YKL-40")
+```
+
+
+```{r Tobit regression pat_type}
+pat_type_reg<-c()
+for(i in muprots){
+  t1<-AER::tobit(log(value_tobit) ~ pat_type,
+            left = dat1$log_max_lLOD[dat1$Analyte == i],
+            data = dat1 %>% 
+            filter(Analyte == i))
+ a<-tidy.tobit(t1) %>% 
+    slice(2) %>% 
+    select(c("term", "estimate", "p.value", "conf.low", "conf.high"))
+  a2<-cbind(i, a)
+  pat_type_reg<-rbind(pat_type_reg, a2)
+}
+
+pat_type_reg %<>% 
+    mutate(across(.cols = -c("i", "term"),
+                \(x) round(x, 3))) %>% 
+  arrange(term, i) 
+```
+
+```{r Tobit regression age pat_type}
+age_reg2<-c()
+t1<-c()
+a<-c()
+a2<-c()
+for(i in muprots){
+  t1<-AER::tobit(log(value_tobit) ~ age_c,
+            left = dat1$log_max_lLOD[dat1$Analyte == i & 
+                     dat1$pat_type == "trauma"],
+            data = dat1 %>% 
+            filter(Analyte == i & 
+                     pat_type == "trauma"))
+ a<-tidy.tobit(t1) %>% 
+    slice(2) %>% 
+    select(c("term", "estimate", "p.value", "conf.low", "conf.high"))
+  a2<-cbind(i, a)
+  age_reg2<-rbind(age_reg2, a2)
+}
+
+age_reg2 %<>% 
+  mutate(across(.cols = -c("i", "term"),
+                \(x) round(x, 3))) %>% 
+  arrange(term, i) %>% 
+  mutate(term = paste("age_type", term, sep = "."))
+```
+
+
+```{r Tobit regression sex pat_type}
+dat1 %<>% 
+  mutate(Sex = relevel(as.factor(Sex), ref = "Male"))
+
+sex_reg<-c()
+t1<-c()
+a<-c()
+a2<-c()
+for(i in muprots){
+  t1<-AER::tobit(log(value_tobit) ~ Sex * pat_type,
+            left = dat1$log_max_lLOD[dat1$Analyte == i],
+            data = dat1 %>% 
+            filter(Analyte == i))
+ a<-tidy.tobit(t1) %>% 
+    slice(2:4) %>% 
+    select(c("term", "estimate", "p.value", "conf.low", "conf.high"))
+  a2<-cbind(i, a)
+  sex_reg<-rbind(sex_reg, a2)
+}
+
+sex_reg %<>% 
+  mutate(across(.cols = -c("i", "term"),
+                \(x) round(x, 3))) %>% 
+  arrange(term, i) %>% 
+  mutate(term = paste("sex_type", term, sep = "."))
+
+  #Getting CIs for the comparason of male and female trauma patients 
+t1<-c()
+t<-c()
+t.ci<-c()
+tdat<-c()
+b<-c()
+b2<-c()
+int.confs<-c()
+K <- matrix(c(0, 1, 0, -1), 1)
+for(i in muprots){
+  t1<-AER::tobit(log(value_tobit) ~ Sex * pat_type,
+            left = dat1$log_max_lLOD[dat1$Analyte == i],
+            data = dat1 %>% 
+            filter(Analyte == i))
+  
+  t <- multcomp::glht(t1, linfct = K)
+  t.ci<-as.vector(confint(t)$confint)
+  tdat<-data.frame(est = t.ci[1],
+                   lwr = t.ci[2],
+                   upr = t.ci[3])
+
+  b2<-cbind(i, tdat)
+  int.confs<-rbind(int.confs, b2)
+}
+
+
+srw<-sex_reg %>% 
+  filter(term %in% c("sex_type.SexFemale", "sex_type.SexFemale:pat_typetrauma")) %>% 
+  select(c("i", "term", "estimate")) %>% 
+  pivot_wider(id_cols = "i",
+              names_from = "term",
+              values_from = "estimate") %>% 
+  mutate(est_diff =
+            `sex_type.SexFemale` - `sex_type.SexFemale:pat_typetrauma`)
+
+srw<-left_join(srw,
+               int.confs,
+               by = "i")
+
+```
+
+
+```{r Tobit regression injury_mech}
+dat1$injury_mech<-as.factor(dat1$injury_mech)
+dat1$injury_mech<-relevel(dat1$injury_mech, 
+                          ref = "Healthy")
+
+injurymech<-c()
+t1<-c()
+a<-c()
+a2<-c()
+for(i in muprots){
+  t1<-AER::tobit(log(value_tobit) ~ injury_mech,
+            left = dat1$log_max_lLOD[dat1$Analyte == i],
+            data = dat1 %>% 
+            filter(Analyte == i))
+ a<-tidy.tobit(t1) %>% 
+    slice(2:6) %>% 
+    select(c("term", "estimate", "p.value", "conf.low", "conf.high"))
+  a2<-cbind(i, a)
+  injurymech<-rbind(injurymech, a2)
+}
+
+injurymech %<>% 
+    mutate(across(.cols = -c("i", "term"),
+                \(x) round(x, 3))) %>% 
+  arrange(term, i) %>% 
+  mutate(term = paste("injury_mech", term, sep = "."))
+
+```
+
+
+```{r Tobit regression wound type general}
+wound_type_general<-c()
+t1<-c()
+a<-c()
+a2<-c()
+for(i in muprots){
+  t1<-AER::tobit(log(value_tobit) ~ wound_type_general,
+            left = dat1$log_max_lLOD[dat1$Analyte == i],
+            data = dat1 %>% 
+            filter(Analyte == i))
+ a<-tidy.tobit(t1) %>% 
+    slice(2:5) %>% 
+    select(c("term", "estimate", "p.value", "conf.low", "conf.high"))
+  a2<-cbind(i, a)
+  wound_type_general<-rbind(wound_type_general, a2)
+}
+
+wound_type_general %<>% 
+    mutate(across(.cols = -c("i", "term"),
+                \(x) round(x, 3))) %>% 
+  arrange(term, i) %>% 
+  mutate(term = paste("wound_general", term, sep = "."))
+```
+
+```{r Tobit regression wound type specific}
+wound_type_specific<-c()
+t1<-c()
+a<-c()
+a2<-c()
+for(i in muprots){
+  t1<-AER::tobit(log(value_tobit) ~ wound_type_specific,
+            left = dat1$log_max_lLOD[dat1$Analyte == i],
+            data = dat1 %>% 
+            filter(Analyte == i))
+ a<-tidy.tobit(t1) %>% 
+    slice(2:9) %>% 
+    select(c("term", "estimate", "p.value", "conf.low", "conf.high"))
+  a2<-cbind(i, a)
+  wound_type_specific<-rbind(wound_type_specific, a2)
+}
+
+wound_type_specific %<>% 
+    mutate(across(.cols = -c("i", "term"),
+                \(x) round(x, 3))) %>% 
+  arrange(term, i) %>% 
+  mutate(term = paste("wound_specific", term, sep = "."))
+```
+
+```{r Tobit regression injury location}
+woundloc<-c()
+t1<-c()
+a<-c()
+a2<-c()
+for(i in muprots){
+  t1<-AER::tobit(log(value_tobit) ~ wound_loc,
+            left = dat1$log_max_lLOD[dat1$Analyte == i],
+            data = dat1 %>% 
+            filter(Analyte == i))
+ a<-tidy.tobit(t1) %>% 
+    slice(2:9) %>% 
+    select(c("term", "estimate", "p.value", "conf.low", "conf.high"))
+  a2<-cbind(i, a)
+  woundloc<-rbind(woundloc, a2)
+}
+
+woundloc %<>% 
+  mutate(across(.cols = -c("i", "term"),
+                \(x) round(x, 3))) %>% 
+  arrange(term, i) %>% 
+  mutate(term = paste("injury_loc", term, sep = "."))
+```
+
+```{r Tobit regression covid + ref}
+dat1 %<>% 
+  mutate(any_covid = case_when(any_covid %in% c("Not tested", "Unknown") ~ NA_character_,
+                               TRUE ~ any_covid), 
+         any_covid = relevel(as.factor(any_covid), ref = "No"))
+
+covid_pos<-c()
+t1<-c()
+a<-c()
+a2<-c()
+for(i in muprots){
+  t1<-AER::tobit(log(value_tobit) ~ any_covid,
+            left = dat1$log_max_lLOD[dat1$Analyte == i],
+            data = dat1 %>% 
+            filter(Analyte == i))
+ a<-tidy.tobit(t1) %>% 
+    slice(2:3) %>% 
+    select(c("term", "estimate", "p.value", "conf.low", "conf.high"))
+  a2<-cbind(i, a)
+  covid_pos<-rbind(covid_pos, a2)
+}
+
+covid_pos %<>% 
+  mutate(across(.cols = -c("i", "term"),
+                \(x) round(x, 3))) %>% 
+  arrange(term, i) %>% 
+  mutate(term = paste("covid_refp", term, sep = "."))
+```
+
+```{r Tobit regression severity 0}
+dat1 %<>% 
+  mutate(severity = factor(severity, 
+                           levels = c(0, 1, 2, 3, 4)))
+
+severity<-c()
+t1<-c()
+a<-c()
+a2<-c()
+for(i in muprots){
+  t1<-AER::tobit(log(value_tobit) ~ severity,
+            left = dat1$log_max_lLOD[dat1$Analyte == i],
+            data = dat1 %>% 
+            filter(Analyte == i))
+ a<-tidy.tobit(t1) %>% 
+    slice(2:5) %>% 
+    select(c("term", "estimate", "p.value", "conf.low", "conf.high"))
+  a2<-cbind(i, a)
+  severity<-rbind(severity, a2)
+}
+
+severity %<>% 
+  mutate(across(.cols = -c("i", "term"),
+                \(x) round(x, 3))) %>% 
+  arrange(term, i) %>% 
+  mutate(term = paste("severity_ref0", term, sep = "."))
+```
+
+
+```{r Tobit regression severity 1}
+dat1 %<>% 
+  mutate(severity_new = factor(severity, 
+                           levels = c(1, 0, 2, 3, 4)))
+
+severity1<-c()
+t1<-c()
+a<-c()
+a2<-c()
+for(i in muprots){
+  t1<-AER::tobit(log(value_tobit) ~ severity_new,
+            left = dat1$log_max_lLOD[dat1$Analyte == i],
+            data = dat1 %>% 
+            filter(Analyte == i))
+ a<-tidy.tobit(t1) %>% 
+    slice(2:5) %>% 
+    select(c("term", "estimate", "p.value", "conf.low", "conf.high"))
+  a2<-cbind(i, a)
+  severity1<-rbind(severity1, a2)
+}
+
+severity1 %<>% 
+  mutate(across(.cols = -c("i", "term"),
+                \(x) round(x, 3))) %>% 
+  arrange(term, i) %>% 
+  mutate(term = paste("severity_ref1", term, sep = "."))
+
+```
+
+```{r pvalues}
+pvals<-bind_rows(pat_type_reg, age_reg2, sex_reg, covid_pos, injurymech, 
+                 severity, severity1, wound_type_general, wound_type_specific, woundloc)
+
+```
+
+
+```{r qvalues new}
+library(qvalue)
+
+qobj <- qvalue(p = pvals$p.value, 
+               fdr.level = 0.01,
+               pi0 = 1)
+t<-qobj %>%
+  purrr::keep(names(.) %in% c("qvalues"#, "significant"
+                              )) %>% 
+  data.frame
+
+pvals<-bind_cols(pvals, t) 
+
+
+p_wide<-pvals %>% 
+  rename("Analyte" = "i") %>% 
+  mutate(significant = case_when(qvalues <= 0.01 ~ "TRUE",
+                                 TRUE ~ "FALSE")) %>% 
+  mutate(across(.cols = c("estimate", "conf.low", "conf.high"),
+                \(x) round(exp(x), 3))) %>% 
+  mutate(qvalues = round(qvalues, 
+                         digits = 3)) %>% 
+  mutate(`log(estimate)` = log(estimate),
+         `log(LCI)` = log(conf.low),
+         `log(UCI)` = log(conf.high)) %>% 
+    relocate(any_of(c("log(estimate)", "log(LCI)", "log(UCI)", "p.value")), .before = "qvalues")
+```
+
+
+```{r create xlsx file}
+library(openxlsx)
+
+wb <- createWorkbook()
+addWorksheet(wb, "pat_type")
+addWorksheet(wb, "age")
+addWorksheet(wb, "sex")
+addWorksheet(wb, "sex contrast")
+addWorksheet(wb, "injury_mech")
+addWorksheet(wb, "injury_loc")
+addWorksheet(wb, "wound_type_general")
+addWorksheet(wb, "wound_type_specific")
+addWorksheet(wb, "covid_pos")
+addWorksheet(wb, "severity0")
+addWorksheet(wb, "severity1")
+
+```
+
+
+```{r save worksheet}
+writeData(wb = wb, 
+          sheet = "pat_type", 
+          p_wide %>% 
+            filter(grepl("^pat_typetrauma", term))
+          )
+
+writeData(wb = wb, 
+          sheet = "age", 
+          p_wide %>% 
+            filter(grepl("age_type", term))
+          )
+
+writeData(wb = wb, 
+          sheet = "sex", 
+          p_wide %>% 
+            filter(grepl("sex_type", term))
+          )
+
+writeData(wb = wb, 
+          sheet = "sex contrast", 
+          srw %>% 
+            select(-"est")
+          )
+
+writeData(wb = wb, 
+          sheet = "injury_mech", 
+          p_wide %>% 
+            filter(grepl("injury_mech", term))
+          )
+
+writeData(wb = wb, 
+          sheet = "injury_loc", 
+          p_wide %>% 
+            filter(grepl("injury_loc", term))
+          )
+
+writeData(wb = wb, 
+          sheet = "wound_type_general", 
+          p_wide %>% 
+            filter(grepl("wound_general", term))
+          )
+
+writeData(wb = wb, 
+          sheet = "wound_type_specific", 
+          p_wide %>% 
+            filter(grepl("wound_specific", term))
+          )
+
+writeData(wb = wb, 
+          sheet = "covid_pos", 
+          p_wide %>% 
+            filter(grepl("covid", term))
+          )
+
+writeData(wb = wb, 
+          sheet = "severity0", 
+          p_wide %>% 
+            filter(grepl("severity_ref0", term))
+          )
+
+writeData(wb = wb, 
+          sheet = "severity1", 
+          p_wide %>% 
+            filter(grepl("severity_ref1", term))
+          )
+
+
+saveWorkbook(wb,
+             paste0(here(), 
+                    "/Results/biomarker_regressions_NEW_", Sys.Date(), ".xlsx"),
+             overwrite = TRUE)
+
+```

@@ -1,0 +1,501 @@
+---
+title: "Parinaz biomarker"
+author: "Emily Ricotta"
+format: html
+editor: visual
+---
+
+```{r setup, include=FALSE}
+library(broom)
+library(tidyverse)
+library(data.table)
+library(magrittr)
+library(Hmisc)
+library(here)
+library(funModeling)
+library(conflicted)
+library(knitr)
+library(skimr)
+
+options(tibble.print_max = Inf, tibble.width = Inf, digits=7, scipen=999, max.print=5000)
+knitr::opts_chunk$set(echo = FALSE)
+
+conflict_prefer("describe", "Hmisc")
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+
+here() 
+```
+
+```{r load data data}
+#Load trauma biomarkers
+trauma<-openxlsx::read.xlsx(paste0(here(), "/Data/Sadtler_Trauma_Results.xlsx"))
+  trauma %<>% 
+    mutate(pat_type = "trauma",
+           VIALID = toupper(VIALID)) %>% 
+    mutate_if(is.character, \(x) na_if(x, ""))
+
+#Load healthy biomarkers
+healthy<-openxlsx::read.xlsx(paste0(here(), "/Data/Sadtler_HC_Results.xlsx"))
+  healthy %<>% 
+    mutate(pat_type = "healthy",
+           VIALID = toupper(VIALID))%>% 
+    mutate_if(is.character, \(x) na_if(x, "")) %>% 
+    mutate(VIALID = case_when(VIALID == "0991703" ~ "P991703",
+                              TRUE ~ VIALID))
+  
+#Load standard curves  
+curves<-openxlsx::read.xlsx(paste0(here(), "/Data/Standard Curve Thresholds.xlsx"))
+
+#Load trauma clinical data
+clinical<-openxlsx::read.xlsx(paste0(here(), "/Data/Clinical_Info.xlsx"))
+clinical$VIALID<-toupper(clinical$VIALID) 
+clinical %<>% 
+  mutate_all(\(x) as.character(x)) %>%  
+  mutate_all(\(x) na_if(x, "#NULL!")) %>% 
+  mutate(ManualArrivalDate = openxlsx::convertToDate(ManualArrivalDate,
+                                                     origin = "1900-01-01"),
+         ManualDeathDate = openxlsx::convertToDate(ManualDeathDate,
+                                                     origin = "1900-01-01"),
+         COV_DATE = lubridate::mdy(COV_DATE))
+
+#Load healthy clinical data
+hdems<-openxlsx::read.xlsx(paste0(here(), "/Data/HC_SERETI_08092023_IS_noPII.xlsx"))
+hdems$VIALID<-toupper(hdems$VIALID)
+
+hdems %<>% 
+  mutate_if(is.character, \(x) na_if(x, "")) %>% 
+    mutate(VIALID = case_when(VIALID == "991703" ~ "P991703",
+                              TRUE ~ VIALID),
+           sample_date = openxlsx::convertToDate(sample_date,
+                                                origin = "1900-01-01"))
+
+```
+
+```{r clean biomarker variables}
+#Need to deal with OOR - separately for HC and Trauma
+#Will try multiple ways:
+#1. Set OOR at LOD, above LOD to uLOD+10%
+#2. Try a modeling method 
+#2a. -Dinse GE, Jusko TA, Ho LA, et al. Accommodating Measurements Below a Limit of Detection: A Novel Application of Cox Regression. American Journal of Epidemiology. 2014;179(8):1018-1024. doi:10.1093/aje/kwu017
+#2b. Tobit model: https://m-clark.github.io/models-by-example/tobit.html
+  #https://cran.r-project.org/web/packages/censReg/vignettes/censReg.pdf
+
+#Remove blank spaces
+curves$Analyte<-gsub(" ", "", curves$Analyte)
+
+#TRAUMA
+#Prep trauma dataset for swapping out OOR values
+trauma %<>% 
+  relocate(pat_type, .after = VIALID)
+
+#Replace values above or below LOD with lookup value from standard curve data
+trauma_l<-trauma %>% 
+  mutate_all(as.character) %>%
+  pivot_longer(.,
+               cols = -c("VIALID", "pat_type"),
+               names_to = "Analyte") %>% 
+  #TE indicates missing data
+  filter(value != "TE") %>% 
+  mutate(Analyte = gsub("\\.", "", Analyte)) %>% 
+  #Join standard curves for each analyte
+  left_join(.,
+            curves %>% 
+              select(c("Analyte", "Trauma-Low", "Trauma-High")),
+            by = "Analyte") %>% 
+  #Replace those OOR with the low or high value for a given analyte and pat type
+  mutate(value_new = case_when(grepl("<", value) ~ `Trauma-Low`,
+                               grepl(">", value) ~ `Trauma-High`,
+                               TRUE ~ as.numeric(value)),
+         value_new = round(value_new, 2),
+         #Create indicator for when an analyte is above LOD
+         above_lod = case_when(value_new > `Trauma-Low` ~ 1,
+                               TRUE ~ 0),
+         lLOD = `Trauma-Low`) 
+
+#Drop duplicated sample
+trauma_l %<>% 
+  filter(VIALID != "87127-C")
+
+#HEALTHY
+#Prep healthy dataset for swapping out OOR values
+healthy %<>% 
+  relocate(pat_type, .after = VIALID)
+
+#Replace values above or below LOD with lookup value from standard curve data
+healthy_l<-healthy %>% 
+  mutate_all(as.character) %>%
+  pivot_longer(.,
+               cols = -c("VIALID", "pat_type"),
+               names_to = "Analyte") %>%
+    #TE indicates missing data
+    filter(value != "TE") %>% 
+  mutate(Analyte = gsub("\\.", "", Analyte)) %>% 
+  #Join standard curves for each analyte
+  left_join(.,
+            curves %>% 
+              select(c("Analyte", "HC-Low", "HC-High")),
+            by = "Analyte") %>% 
+  #Replace those OOR with the low or high value for a given analyte and pat type
+  mutate(value_new = case_when(grepl("<", value) ~ `HC-Low`,
+                               grepl(">", value) ~ `HC-High`,
+                               TRUE ~ as.numeric(value)),
+         value_new = round(value_new, 2),
+         #Create indicator for when an analyte is above LOD
+         above_lod = case_when(value_new > `HC-Low` ~ 1,
+                               TRUE ~ 0),
+         lLOD = `HC-Low`)
+
+#Drop duplicated sample
+healthy_l %<>% 
+  filter(VIALID != "87127-C") 
+
+#Concatenate HC and Trauma - pat_type variable created above
+biom_l<-bind_rows(trauma_l, healthy_l) %>% 
+  select(c("VIALID", "pat_type", "Analyte", "value", "value_new", "above_lod", "lLOD"))
+
+#Rename dataset
+dat1<-biom_l
+         
+```
+
+```{r analysis variables}
+#Analysis variables:
+#value = original biomarker value
+#value_new = biomarker w/ OOR replaced using #1 above
+#max_value_new = max(value_new) for analyte
+#log_value = log(value_new)
+#value_no_uOOR = lOOR made NA (censored), uOOR using value_new.
+#rev_val = reversed value of value_new for #2a method above - involves subtracting value_new from 
+    #the analyte's maximum value + 10% (10% chosen arbitrarily)
+#rev_val = reversed value of value_no_uOOR for #2a method above  - involves subtracting value_no_uOOR from 
+    #the analyte's maximum value + 10% (10% chosen arbitrarily)
+#value_tobit = Replaced value_no_uOOR under lLOD or missing with 0 for #2b method above, otherwise,
+    #value_no_uOOR
+#value_lognorm_tobit = log(value_lognorm_tobit) or 0 if value_tobit == 0
+
+dat1 %<>% 
+  group_by(Analyte) %>% 
+  mutate(max_value_new = max(value_new),
+         value_no_uOOR = case_when(grepl("<", value) ~ NA_real_,
+                           grepl(">", value) ~ (max_value_new+(max_value_new*0.1)),
+                           TRUE ~ as.numeric(value)),
+         value_no_uOOR = round(value_no_uOOR, 4),
+         rev_val = (max_value_new+(max_value_new*0.1)) - value_new,
+         rev_val_na = (max_value_new+(max_value_new*0.1)) - value_no_uOOR,
+         value_tobit = case_when(is.na(value_no_uOOR) | 
+                                    value_no_uOOR < lLOD ~ 0,
+                                  TRUE ~ value_no_uOOR),
+         value_lognorm_tobit = case_when(value_tobit == 0 ~ 0,
+                                          TRUE ~ log(value_tobit)))
+#Ignore warnings
+
+
+#Adding the highest lLOD (healthy vs trauma) for each biomarker
+t<-dat1 %>% 
+  group_by(Analyte) %>% 
+  count(lLOD) %>% 
+  group_by(Analyte) %>% 
+  arrange(desc(lLOD)) %>% 
+  slice(1) %>% 
+  select(-"n") %>% 
+  rename("max_lLOD"="lLOD")
+
+dat1<-left_join(dat1,
+                t,
+                by = "Analyte")
+dat1 %<>% 
+  mutate(log_max_lLOD = log(max_lLOD))
+
+```
+
+```{r join clinical data}
+clin_dem<-bind_rows(clinical,
+                    hdems %>% 
+                      select(-"sample_date") %>% 
+                      mutate_all(\(x) as.character(x)))
+
+clin_dem_small<-clin_dem %>% 
+  select(c("VIALID", "MechanismOfInjury", "Age", "Sex", 
+           "Race", "Hispanic", "TraumaDesignation","TransportOrigin", "ArrivalMonth", 
+           "ArrivalDayofMonth", "ArrivalYear", "TraumaDesignation","InjuryLocation1", "InjuryLocation2", 
+           "InjuryLocation3", "InjuryLocation4", "InjuryLocation5", "InjuryType1", "InjuryType2", 
+           "InjuryType3", "InjuryType4", "InjuryType5", "EyeScore", "VerbalScore",
+           "MotorScore", "GCSTotal", "GCSQualifiers", "WentToOR", "ICUDays",
+           "DischargeStatus", "ManualDeathDate", "COV_START", "COV_MONTH", "COV_DATE",
+           "TraumaSymptoms1", "TraumaSymptoms2", "TraumaSymptoms3", "TraumaSymptoms4", "TraumaSymptoms5",
+           "TraumaSymptoms6", "TraumaSymptoms7", "TraumaSymptoms8", "TraumaSymptoms9",
+           "TestResults1", "TestResults2", "TestResults3")) 
+
+dat1<-left_join(dat1,
+                clin_dem_small,
+                by = "VIALID") %>% 
+  #Dropping trauma patients missing all clinical information
+  filter(VIALID %nin% c("85236-B", "87449-B", "91794-B")) 
+
+#Create "healthy" level for all categorical variables
+dat1 %<>% 
+  mutate(across(.cols = c("MechanismOfInjury","TraumaDesignation", "TransportOrigin", "ArrivalMonth", "ArrivalDayofMonth", 
+                          "ArrivalYear", "InjuryLocation1", "InjuryLocation2", "InjuryLocation3", 
+                          "InjuryLocation4", "InjuryLocation5", "InjuryType1", "InjuryType2", 
+                          "InjuryType3", "InjuryType4", "InjuryType5", "MotorScore", "GCSQualifiers", 
+                          "WentToOR", "DischargeStatus", "COV_START", "COV_MONTH", "TraumaSymptoms1", 
+                          "TraumaSymptoms2", "TraumaSymptoms3", "TraumaSymptoms4", "TraumaSymptoms5", 
+                          "TraumaSymptoms6", "TraumaSymptoms7", "TraumaSymptoms8", "TraumaSymptoms9", 
+                          "TestResults1", "TestResults2", "TestResults3"),
+                \(x) ifelse(pat_type == "healthy", "healthy", x))) %>% 
+  mutate(across(.cols = c("EyeScore", "VerbalScore"),
+                \(x) as.character(x)))
+
+```
+
+```{r create additional variables}
+dat1 %<>% 
+  mutate(died = case_when(!is.na(ManualDeathDate) ~ "Died",
+                          pat_type == "healthy" ~ "Healthy",
+                          TRUE ~ "Survived"),
+         OR = case_when(WentToOR == 1 ~ "No OR",
+                        WentToOR == 2 ~ "Yes OR",
+                        pat_type == "healthy" ~ "Healthy",
+                        TRUE ~ NA_character_),
+        ICU = case_when(!is.na(ICUDays) ~ "Yes ICU",
+                         pat_type == "healthy" ~ "Healthy",
+                         TRUE ~ "No ICU"),
+         ICUDays = as.numeric(ICUDays),
+         ICU_cat = case_when(ICUDays == 0 ~ "0 days",
+                             ICUDays >= 1 & 
+                               ICUDays < 3 ~ "1-2 days",
+                             ICUDays >= 3 &
+                               ICUDays < 8 ~ "3-7 days",
+                             ICUDays >= 8 & 
+                               ICUDays < 15 ~ "8-14 days",
+                             ICUDays >= 15 &
+                               ICUDays < 31 ~ "15-30 days",
+                             ICUDays >= 30 ~ "31+ days",
+                             pat_type == "healthy" ~ "Healthy",
+                             TRUE ~ NA_character_),
+        #Reversed trauma severity score so least severe (e.g., Alert, 4) is 1
+        severity = case_when(pat_type == "healthy" ~ 0,
+                             TraumaDesignation == 5 |
+                               is.na(TraumaDesignation) ~ NA_real_,
+                             TraumaDesignation == 4 ~ 1, 
+                             TraumaDesignation == 3 ~ 2, 
+                             TraumaDesignation == 2 ~ 3,
+                             TRUE ~ 4),
+        cov_test_results = case_when(TestResults1 == 1 ~ "Positive",
+                                     TestResults1 == 2 |
+                                       TestResults1 == 4 ~ "Negative",
+                                     TestResults2 == 3 ~ "Antibodies",
+                                     is.na(TestResults1) &
+                                       pat_type == "healthy" ~ "Healthy",
+                                     TRUE ~ NA_character_))
+
+#Convert all "Unknown" values to NA. Convert vars to numeric where appropriate.
+dat1 %<>% 
+  mutate(across(.cols = c("Race", "Hispanic", "TraumaDesignation", "TransportOrigin", "DischargeStatus", 
+                          "EyeScore", "VerbalScore", "MotorScore", "TraumaSymptoms3", "TraumaSymptoms4", 
+                          "TraumaSymptoms5", "TraumaSymptoms6", "TraumaSymptoms7", "TraumaSymptoms8", "TraumaSymptoms9"),
+                \(x) case_when(x == max(x) ~ NA_character_,
+                               TRUE ~ x))) %>% 
+  mutate(across(.cols = c("Age", "GCSTotal"),
+                \(x) as.numeric(x)))
+
+#Creating injury type variables
+#31:35 correspond to variables InjuryType1:InjuryType5
+inj_type_vars<-c("InjuryType1", "InjuryType2", "InjuryType3", "InjuryType4", "InjuryType5")
+dat1$inj_small<-ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("8","13")))[,inj_type_vars]*1)>=1, "Fracture",
+                       ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("12")))[,c(inj_type_vars)]*1)>=1, "Laceration",
+                              ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("1")))[,c(inj_type_vars)]*1)>=1, "Abrasion",
+                                     ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("5")))[,c(inj_type_vars)]*1)>=1, "Contusion",
+                                            ifelse(rowSums(apply(dat1, 2, \(x) (x %in% "healthy"))[,c(inj_type_vars)]*1)>=5, "Healthy", "Other wound type")))))
+
+
+#Create penetrating wounds variable
+dat1$penetrating<-ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("1","2","3","4","9","11","12","13","14","16")))[,c(inj_type_vars)]*1)>=1, "Any penetrating wound",
+                         ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("18", "19", "6")))[,c(inj_type_vars)]*1)>=5, "Unknown wound type",
+                                ifelse(rowSums(apply(dat1, 2, \(x) (is.na(x)))[,c(inj_type_vars)]*1)>=5, NA,
+                                       ifelse(rowSums(apply(dat1, 2, \(x) (x %in% "healthy"))[,c(inj_type_vars)]*1)>=5, "Healthy", "No penetrating wound"))))
+
+#Create internal wounds variable
+dat1$internal<-ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("5","7","8","10","15","17")))[,c(inj_type_vars)]*1)>=1, "Any internal wound",
+                      ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("18", "19", "6")))[,c(inj_type_vars)]*1)>=5, "Unknown wound type",
+                             ifelse(rowSums(apply(dat1, 2, \(x) (is.na(x)))[,c(inj_type_vars)]*1)>=5, NA,
+                                    ifelse(rowSums(apply(dat1, 2, \(x) (x %in% "healthy"))[,c(inj_type_vars)]*1)>=5, "Healthy", "No internal wound"))))
+
+#Create bone wounds variable
+dat1$bone<-ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("2","8","13")))[,c(inj_type_vars)]*1)>=1, "Any bone wound",
+                  ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("18", "19", "6")))[,c(inj_type_vars)]*1)>=5, "Unknown wound type",
+                         ifelse(rowSums(apply(dat1, 2, \(x) (is.na(x)))[,c(inj_type_vars)]*1)>=5, NA,
+                                ifelse(rowSums(apply(dat1, 2, \(x) (x %in% "healthy"))[,c(inj_type_vars)]*1)>=5, "Healthy", "No bone wound"))))
+
+#Create internal+soft tissue wounds variable
+dat1$internal_soft_tissue<-ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("5","7","10","15","17")))[,c(inj_type_vars)]*1)>=1, "Any internal soft tissue wound",
+                                  ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("18", "19", "6")))[,c(inj_type_vars)]*1)>=5, "Unknown wound type",
+                                         ifelse(rowSums(apply(dat1, 2, \(x) (is.na(x)))[,c(inj_type_vars)]*1)>=5, NA,
+                                                ifelse(rowSums(apply(dat1, 2, \(x) (x %in% "healthy"))[,c(inj_type_vars)]*1)>=5, "Healthy", "No internal soft tissue wound"))))
+
+#Create penetrating + soft tissue wounds variable
+dat1$penetrating_soft_tissue<-ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("1","3","4","9","11","12","14","16", "2", "13")))[,c(inj_type_vars)]*1)>=1, "Any penetrating soft tissue wound",
+                                     ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("18", "19", "6")))[,c(inj_type_vars)]*1)>=5, "Unknown wound type",
+                                            ifelse(rowSums(apply(dat1, 2, \(x) (is.na(x)))[,c(inj_type_vars)]*1)>=5, NA,
+                                                   ifelse(rowSums(apply(dat1, 2, \(x) (x %in% "healthy"))[,c(inj_type_vars)]*1)>=5, "Healthy", "No penetrating soft tissue wound"))))
+
+
+#Creating injury location variables
+#24:30 correspond to variables InjuryLocation1:InjuryLocation5
+inj_loc_vars<-c("InjuryLocation1", "InjuryLocation2", "InjuryLocation3", "InjuryLocation4", "InjuryLocation5")
+#Create head/neck wounds variable
+dat1$headneck<-ifelse(rowSums(apply(dat1, 2, \(x) (x %in% "1"))[,c(inj_loc_vars)]*1)>=1, "Any head/neck wound",
+                      ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("26", "27")))[,c(inj_loc_vars)]*1)>=5, "Unknown wound location",
+                             ifelse(rowSums(apply(dat1, 2, \(x) (is.na(x)))[,c(inj_loc_vars)]*1)>=5, NA,
+                                    ifelse(rowSums(apply(dat1, 2, \(x) (x %in% "healthy"))[,c(inj_loc_vars)]*1)>=5, "Healthy", "No head/neck wound"))))
+
+#Create peripheral wounds variable
+dat1$peripheral<-ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("2","3","4","5","6","7","12","13","14","15","16","17","18","19","20","21","22","23")))[,c(inj_loc_vars)]*1)>=1, "Any peripheral wound",
+                        ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("26", "27")))[,c(inj_loc_vars)]*1)>=5, "Unknown wound location",
+                               ifelse(rowSums(apply(dat1, 2, \(x) (is.na(x)))[,c(inj_loc_vars)]*1)>=5, NA,
+                                      ifelse(rowSums(apply(dat1, 2, \(x) (x %in% "healthy"))[,c(inj_loc_vars)]*1)>=5, "Healthy", "No peripheral wound"))))
+
+#Create central wounds variable
+dat1$central<-ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("8","9","10","11","24","25")))[,c(inj_loc_vars)]*1)>=1, "Any central wound",
+                     ifelse(rowSums(apply(dat1, 2, \(x) (x %in% c("26", "27")))[,c(inj_loc_vars)]*1)>=5, "Unknown wound location",
+                            ifelse(rowSums(apply(dat1, 2, \(x) (is.na(x)))[,c(inj_loc_vars)]*1)>=5, NA,
+                                   ifelse(rowSums(apply(dat1, 2, \(x) (x %in% "healthy"))[,c(inj_loc_vars)]*1)>=5, "Healthy", "No central wound"))))
+
+#Creating injury mechanism categories
+dat1 %<>% 
+  mutate(MechanismOfInjury = case_when(MechanismOfInjury == 1 ~ "Motor vehicle crash",
+                                       MechanismOfInjury == 2 ~ "Other motorized transportation",
+                                       MechanismOfInjury == 3 ~ "Non-motorized transportation",
+                                       MechanismOfInjury == 4 ~ "Fall",
+                                       MechanismOfInjury == 5 ~ "Drowning",
+                                       MechanismOfInjury == 6 ~ "Fire/burn",
+                                       MechanismOfInjury == 7 ~ "Nature",
+                                       MechanismOfInjury == 8 ~ "Other, unspecified",
+                                       MechanismOfInjury == 9 ~ "Other, specified",
+                                       MechanismOfInjury == 10 ~ "GSW",
+                                       MechanismOfInjury == 11 ~ "SGW",
+                                       MechanismOfInjury == 12 ~ "Stab",
+                                       MechanismOfInjury == 13 ~ "Assault",
+                                       is.na(MechanismOfInjury) ~ NA_character_)) %>% 
+  mutate(injury_mech = case_when(MechanismOfInjury == "Fall" ~ "Fall",
+                                 MechanismOfInjury == "GSW" ~ "GSW",
+                                 MechanismOfInjury == "Motor vehicle crash" ~ "Motor vehicle crash",
+                                 MechanismOfInjury == "Stab" ~ "Stab",
+                                 pat_type == "healthy" ~ "Healthy",
+                                 is.na(MechanismOfInjury) ~ NA_character_,
+                                 TRUE ~ "Other"))
+
+dat1 %<>% 
+  mutate(across(.cols = c("penetrating", "internal", "bone", "internal_soft_tissue", "penetrating_soft_tissue"), 
+                \(x) ifelse(is.na(x), "Unknown wound type", x))) %>% 
+  mutate(across(.cols = c("headneck", "peripheral", "central"),
+                \(x) ifelse(is.na(x), "Unknown wound location", x)))
+
+dat1 %<>% 
+  mutate(wound_type_general = case_when(penetrating == "Any penetrating wound" &
+                                          internal == "No internal wound" ~ "Penetrating wound only",
+                                        internal == "Any internal wound" &
+                                          penetrating == "No penetrating wound" ~ "Internal wound only",
+                                        internal == "Any internal wound" &
+                                          penetrating == "Any penetrating wound" ~ "Both wound types",
+                                        internal == "Healthy" ~ "Healthy",
+                                        TRUE ~ "Unknown wound type"),
+         wound_type_general = relevel(as.factor(wound_type_general), ref = "Healthy"))
+
+dat1 %<>% 
+  mutate(wound_type_specific = case_when(penetrating_soft_tissue == "Any penetrating soft tissue wound" &
+                                           internal_soft_tissue == "No internal soft tissue wound" &
+                                           bone == "No bone wound" ~ "Penetrating soft tissue wound only",
+                                         penetrating_soft_tissue == "No penetrating soft tissue wound" &
+                                           internal_soft_tissue == "Any internal soft tissue wound" &
+                                           bone == "No bone wound" ~ "Internal soft tissue wound only",
+                                         penetrating_soft_tissue == "Any penetrating soft tissue wound" &
+                                           internal_soft_tissue == "Any internal soft tissue wound" &
+                                           bone == "No bone wound" ~ "Penetrating and internal soft tissue wounds",
+                                         penetrating_soft_tissue == "Any penetrating soft tissue wound" &
+                                           internal_soft_tissue == "No internal soft tissue wound" &
+                                           bone == "Any bone wound" ~ "Penetrating soft tissue & bone wounds",
+                                         penetrating_soft_tissue == "No penetrating soft tissue wound" &
+                                           internal_soft_tissue == "Any internal soft tissue wound" &
+                                           bone == "Any bone wound" ~ "Internal soft tissue & bone wounds",
+                                         penetrating_soft_tissue == "Any penetrating soft tissue wound" &
+                                           internal_soft_tissue == "Any internal soft tissue wound" &
+                                           bone == "Any bone wound" ~ "All wound types",
+                                         penetrating_soft_tissue == "No penetrating soft tissue wound" &
+                                           internal_soft_tissue == "No internal soft tissue wound" &
+                                           bone == "Any bone wound" ~ "Bone wound only",
+                                         internal == "Healthy" ~ "Healthy",
+                                         TRUE ~ "Unknown wound type"),
+         wound_type_specific = relevel(as.factor(wound_type_specific), ref = "Healthy"))
+
+dat1 %<>% 
+  mutate(wound_loc = case_when(headneck == "Any head/neck wound" &
+                                 peripheral == "Any peripheral wound" &
+                                 central == "Any central wound" ~ "All wound locations",
+                               headneck == "Any head/neck wound" &
+                                 peripheral == "Any peripheral wound" &
+                                 central == "No central wound" ~ "Head/neck and peripheral wounds",
+                               headneck == "Any head/neck wound" &
+                                 peripheral == "No peripheral wound" &
+                                 central == "Any central wound" ~ "Head/neck and central wounds",
+                               headneck == "Any head/neck wound" &
+                                 peripheral == "No peripheral wound" &
+                                 central == "No central wound" ~ "Head/neck wound only",
+                               headneck == "No head/neck wound" &
+                                 peripheral == "Any peripheral wound" &
+                                 central == "Any central wound" ~ "Peripheral and central wounds",
+                               headneck == "No head/neck wound" &
+                                 peripheral == "Any peripheral wound" &
+                                 central == "No central wound" ~ "Peripheral wound only",
+                               headneck == "No head/neck wound" &
+                                 peripheral == "No peripheral wound" &
+                                 central == "Any central wound" ~ "Central wound only",
+                               headneck == "Healthy" ~ "Healthy",
+                               TRUE ~ "Unknown wound location"),
+         wound_loc = relevel(as.factor(wound_loc), ref = "Healthy"))
+
+dat1 %<>% 
+  mutate(any_covid = case_when(cov_test_results == "Positive" ~ "Yes",
+                               cov_test_results == "Negative" ~ "No",
+                               is.na(cov_test_results) & 
+                                 pat_type == "trauma" ~ "Not tested",
+                               pat_type == "healthy" ~ "Healthy",
+                               TRUE ~ "Unknown"))
+
+dat1 %<>% 
+  mutate(Sex = case_when(Sex == 1 ~ "Male",
+                         Sex == 2 ~ "Female",
+                         TRUE ~ NA_character_))
+
+
+ dat1 %<>% 
+   mutate(age_c = Age - mean(Age, na.rm = T))
+
+```
+
+```{r create patient row level dataset}
+dems<-dat1 %>% 
+  ungroup() %>% 
+  select(c("VIALID", "pat_type", "MechanismOfInjury", "Age", "Sex", 
+           "Race", "Hispanic", "TraumaDesignation", "TransportOrigin", "ArrivalMonth", 
+           "ArrivalDayofMonth", "ArrivalYear", "InjuryLocation1", "InjuryLocation2", "InjuryLocation3",
+           "InjuryLocation4", "InjuryLocation5", "InjuryType1", "InjuryType2", "InjuryType3", 
+           "InjuryType4", "InjuryType5", "EyeScore", "VerbalScore", "MotorScore", 
+           "GCSTotal", "GCSQualifiers", "WentToOR", "ICUDays", "DischargeStatus", 
+           "ManualDeathDate", "COV_START", "COV_MONTH", "COV_DATE", "TraumaSymptoms1", 
+           "TraumaSymptoms2", "TraumaSymptoms3", "TraumaSymptoms4", "TraumaSymptoms5", "TraumaSymptoms6", 
+           "TraumaSymptoms7", "TraumaSymptoms8", "TraumaSymptoms9", "TestResults1", "TestResults2",
+           "TestResults3", "died", "OR", "ICU", "ICU_cat", 
+           "bigouch", "severity", "penetrating", "internal", "bone", 
+           "internal_soft_tissue", "penetrating_soft_tissue", "headneck", "peripheral", "central", 
+           "injury_mech", "wound_type_general", "wound_type_specific", "wound_loc", "any_covid")) %>% 
+  distinct()
+
+```
+
+```{r save data}
+save(dat1, file = paste0(here(), "/Data/dat1_", Sys.Date(), ".RData"))
+save(dems, file = paste0(here(), "/Data/dems_", Sys.Date(), ".RData"))
+
+```
