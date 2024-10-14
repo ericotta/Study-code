@@ -56,7 +56,8 @@ load(max_dems)
 
 ```{r normalize the data}
 
-dat1 %<>% 
+dat1 %<>%
+  mutate(age_c = Age - mean(Age, na.rm = T)) %>% 
   mutate(value_normalize = normalize(value_tobit,
                                      method = "standardize"))
 
@@ -68,7 +69,7 @@ dat1_wide<-pivot_wider(dat1 %>%
                        values_from = "value_normalize")
 
 dat1_wide<-left_join(dems %>% 
-                       select(c("VIALID", "pat_type", "age_c", "died", 
+                       select(c("VIALID", "pat_type", "died", 
                                 "Sex", "severity", "any_covid")),
                      dat1_wide,
                      by = "VIALID")
@@ -181,7 +182,7 @@ get_all_models = function(df, params){
   t_metrics$trees = params$ntrees #pull ntrees from params
   
   #select model with highest roc_auc
-  f_params = select_best(t_model, "roc_auc")
+  f_params = select_best(t_model, metric = "roc_auc")
   f_model = finalize_mod(f_params, params)
   
   # obtain the model output for the test set
@@ -875,7 +876,7 @@ get_all_models = function(df, params){
   t_metrics$trees = params$ntrees #pull ntrees from params
   
   #select model with highest roc_auc
-  f_params = select_best(t_model, "roc_auc")
+  f_params = select_best(t_model, metric = "roc_auc")
   f_model = finalize_mod(f_params, params)
   
   # obtain the model output for the test set
@@ -1243,6 +1244,18 @@ out8 = entirety(seed_set = 810, df = dat_2h)
 out9 = entirety(seed_set = 910, df = dat_2h)
 out10 = entirety(seed_set = 1010, df = dat_2h)
 
+#This will get you the pr_auc and roc_auc for the final models
+
+pluck(out1, 1, 6)
+pluck(out2, 1, 6)
+pluck(out3, 1, 6)
+pluck(out4, 1, 6)
+pluck(out5, 1, 6)
+pluck(out6, 1, 6)
+pluck(out7, 1, 6)
+pluck(out8, 1, 6)
+pluck(out9, 1, 6)
+pluck(out10, 1, 6)
 
 # Extract and bind features
 
@@ -1570,8 +1583,8 @@ get_all_models = function(df, params){
   t_metrics$trees = params$ntrees #pull ntrees from params
   
   #select model with highest roc_auc
-  f_params=select_best(t_model, "roc_auc")
-  f_model=finalize_mod(f_params, params)
+  f_params = select_best(t_model, metric = "roc_auc")
+  f_model = finalize_mod(f_params, params)
   
   # obtain the model output for the test set
   v_model = valid_mod(d_list[[1]], rec, f_model)
@@ -1937,6 +1950,18 @@ out8 = entirety(seed_set = 810, df = dat_3h)
 out9 = entirety(seed_set = 910, df = dat_3h)
 out10 = entirety(seed_set = 1010, df = dat_3h)
 
+#This will get you the pr_auc and roc_auc for the final models
+
+pluck(out1, 1, 6)
+pluck(out2, 1, 6)
+pluck(out3, 1, 6)
+pluck(out4, 1, 6)
+pluck(out5, 1, 6)
+pluck(out6, 1, 6)
+pluck(out7, 1, 6)
+pluck(out8, 1, 6)
+pluck(out9, 1, 6)
+pluck(out10, 1, 6)
 
 # Extract and bind features
 
