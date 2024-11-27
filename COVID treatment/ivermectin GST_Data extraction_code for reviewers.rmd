@@ -1,0 +1,125 @@
+---
+title: "Search interest in alleged COVID-19 treatments during the pandemic and the impact of mass news media - Data downloads"
+author: "Samantha Bents"
+output: html_document
+---
+
+This code will no longer work because Google Trends has removed access via the API. This code is provided for reviewer reference only. 
+
+```{r setup}
+library(gtrendsR)
+library(tibbletime)
+library(anomalize)
+library(cowplot)
+library(MASS)
+library(ggpubr)
+
+setwd("{username}/Year_2024/ivermectin")
+
+```
+```{r time series}
+# National Time series for each treatment from GST
+national <- gtrends(
+    keyword = "ivermectin",
+    geo = c("US"),
+    time = "2019-01-01 2022-10-01",
+    onlyInterest = TRUE
+)
+
+nat_rem <- gtrends(
+    keyword = "remdesivir",
+    geo = c("US"),
+    time = "2019-01-01 2022-10-01",
+    onlyInterest = TRUE
+)
+
+nat_hyd <- gtrends(
+    keyword = "hydroxychloroquine",
+    geo = c("US"),
+    time = "2019-01-01 2022-10-01",
+    onlyInterest = TRUE
+)
+
+nat_hcq <- gtrends(
+    keyword = "HCQ",
+    geo = c("US"),
+    time = "2019-01-01 2022-10-01",
+    onlyInterest = TRUE
+)
+
+# save national time series
+nat_gst_treatments <- rbind(national, nat_rem, nat_hyd)
+write.csv(nat_gst_treatments, "nat_gst_treatments_may15.csv")
+```
+
+```{r Figure_1}
+## Plot anomalies for each treatment
+iver_anomalized <- as_tibble(national$interest_over_time) %>%
+    mutate(hits = replace(hits, hits == "<1", 0)) %>%
+    dplyr::select(date, hits) %>%
+    time_decompose(hits, merge = TRUE) %>%
+    anomalize(remainder) %>%
+    time_recompose()
+head(iver_anomalized)
+
+nati <- iver_anomalized %>%
+    plot_anomalies(ncol = 10, alpha_dots = 0.65) +
+    ylab("GST Hits") +
+    xlab("Date") +
+    xlab("Date") +
+    theme(legend.position = "none") +
+    theme(
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank()
+    ) +
+    ggtitle("Ivermectin")
+nati
+
+### remdesivir
+rem_anomalized <- as_tibble(nat_rem$interest_over_time) %>%
+    mutate(hits = replace(hits, hits == "<1", 0)) %>%
+    dplyr::select(date, hits) %>%
+    time_decompose(hits, merge = TRUE) %>%
+    anomalize(remainder) %>%
+    time_recompose()
+
+natr <- rem_anomalized %>%
+    plot_anomalies(ncol = 10, alpha_dots = 0.65) +
+    ylab("GST Hits") +
+    xlab("Date") +
+    xlab("Date") +
+    ggtitle("Remdesivir")
+natr
+
+# hydroxychloroquine
+hyd_anomalized <- as_tibble(nat_hyd$interest_over_time) %>%
+    mutate(hits = replace(hits, hits == "<1", 0)) %>%
+    dplyr::select(date, hits) %>%
+    time_decompose(hits, merge = TRUE) %>%
+    anomalize(remainder) %>%
+    time_recompose()
+
+nath <- hyd_anomalized %>%
+    plot_anomalies(ncol = 10, alpha_dots = 0.65) +
+    ylab("GST Hits") +
+    xlab("Date") +
+    xlab("Date") +
+    theme(legend.position = "none") +
+    theme(
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank()
+    ) +
+    ggtitle("Hydroxychloroquine")
+nath
+
+# plot
+fig1 <- plot_grid(nath, nati, natr,
+    ncol = 1, labels = c("A", "B", "C"),
+    rel_heights = c(3, 3, 5)
+)
+fig1
+
+jpeg("Figure1_anomalies.jpeg", units = "in", width = 8, height = 6, res = 300)
+ggarrange(fig1)
+dev.off()
+```

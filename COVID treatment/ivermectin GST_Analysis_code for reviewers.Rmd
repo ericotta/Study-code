@@ -1,0 +1,376 @@
+---
+title: "Search interest in alleged COVID-19 treatments during the pandemic and the impact of mass news media - Regressions & Figures"
+author: "Emily Ricotta"
+output: html_document
+date: "2024-06-28"
+---
+
+```{r setup, include=FALSE}
+library(broom.mixed)
+library(tidyverse)
+library(data.table)
+library(magrittr)
+library(Hmisc)
+library(here)
+library(conflicted)
+library(knitr)
+library(skimr)
+library(ggplot2)
+library(GGally)
+library(lme4)
+
+options(tibble.print_max = Inf, tibble.width = Inf, digits=7, scipen=999, max.print=5000,  width=150)
+knitr::opts_chunk$set(echo = FALSE)
+
+conflict_prefer("describe", "Hmisc")
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflicts_prefer(lubridate::year)
+
+
+library(httpgd)
+
+
+hgd()
+#hgd_browse()
+```
+
+```{r load and merge data}
+path_HJ <- "{username}/My Drive/Project folders/DVRN/GST_MC/" 
+
+#Load Google Search Trend data for each treatment
+gst_H<-fread(paste0(path_HJ, "GST_ALL_STATES_hydroxychloroquine.csv"))
+gst_I<-fread(paste0(path_HJ, "GST_ALL_STATES_ivermectin.csv"))
+gst_R<-fread(paste0(path_HJ, "GST_ALL_STATES_remdesivir.csv"))
+
+gst<-bind_rows(gst_H, gst_I, gst_R)
+
+#Load MediaCloud data for each treatment
+mc_H<-fread(paste0(path_HJ, "MC_ALL_STATES_hydroxychloroquine.csv")) %>% 
+  mutate(keyword = "hydroxychloroquine")
+mc_I<-fread(paste0(path_HJ, "MC_ALL_STATES_ivermectin.csv")) %>% 
+  mutate(keyword = "ivermectin")
+mc_R<-fread(paste0(path_HJ, "MC_ALL_STATES_remdesivir.csv")) %>% 
+  mutate(keyword = "remdesivir")
+
+mc<-bind_rows(mc_H, mc_I, mc_R)
+
+gst %<>%
+  mutate(
+    week = epiweek(date),
+    year = year(date)
+  ) %>%
+  select(c("date", "hits", "keyword", "geo", "year", "week")) %>%
+  distinct()
+
+mc %<>%
+  mutate(date = as.Date(date, "%m/%d/%Y %H:%M")) %>%
+  mutate(
+    week = epiweek(date),
+    year = year(date)
+  ) %>%
+  mutate(week = case_when(
+    geo == "US-RI" &
+      year == "2021" &
+      date %in% c("2021-12-24", "2021-12-25", "2021-12-26") ~ 52,
+    TRUE ~ week
+  )) %>%
+  select(c("date", "keyword", "count", "total_count", "ratio", "geo", "year", "week")) %>%
+  distinct()
+
+
+#MC data at day level, creating a weekly average for analysis to match level of GST # nolint
+mc_ave <- mc %>%
+  group_by(keyword, geo, year, week) %>%
+  mutate(ratio_ave = mean(ratio)) %>%
+  select(-c("count", "total_count", "ratio")) %>% 
+  distinct()
+
+```
+
+```{r means}
+#Can ignore NAs introduced by coersion warning
+gst %>%
+mutate(hits = as.numeric(hits)) %>%
+filter(year %in% c("2020", "2021", "2022")) %>%
+group_by(keyword) %>%
+summarise(mean = mean(hits, na.rm = TRUE),
+          sd = sd(hits, na.rm = TRUE))
+
+gst %>%
+mutate(hits = as.numeric(hits)) %>%
+filter(year %in% c("2019")) %>%
+group_by(keyword) %>%
+summarise(mean = mean(hits, na.rm = TRUE),
+          sd = sd(hits, na.rm = TRUE))
+
+mc %>%
+  filter(year %in% c("2020", "2021", "2022")) %>%
+  group_by(keyword) %>%
+  summarise(mean = mean(ratio, na.rm = T)*100, 
+            sd = sd(ratio, na.rm = T)*100)
+
+mc_ave %>%
+  filter(year %in% c("2020", "2021", "2022")) %>% #&
+  #ratio > 0) %>%
+  group_by(keyword) %>%
+  summarise(
+    mean = mean(ratio_ave, na.rm = T) * 100,
+    sd = sd(ratio_ave, na.rm = T) * 100,
+    range_l = range(ratio_ave, na.rm = T)[1] * 100,
+    range_u = range(ratio_ave, na.rm = T)[2] * 100)
+
+mc_ave %>%
+  filter(year %in% c("2020", "2021", "2022")) %>% # &
+  # ratio > 0) %>%
+  group_by(keyword, geo) %>%
+  summarise(
+    mean = mean(ratio_ave, na.rm = T) * 100,
+    sd = sd(ratio_ave, na.rm = T) * 100,
+    range_l = range(ratio_ave, na.rm = T)[1] * 100,
+    range_u = range(ratio_ave, na.rm = T)[2] * 100
+  )
+
+```
+
+```{r merge data for analysis}
+dat<-left_join(gst,
+               mc_ave %>%
+               select(-"date") %>%
+               distinct(),
+               by = c("keyword", "geo", "year", "week")) %>% 
+  rename("state" = "geo",
+         "treatment" = "keyword")
+
+dat %<>% 
+  mutate(state = str_sub(state, start = 4, end = 5))
+
+#Load covariate data
+covs<-fread(paste0(path_HJ, "state_covariates.csv"))
+
+dat<-left_join(dat,
+               covs %>% 
+                 select(-"V1"),
+               by = "state") %>% 
+  distinct()
+
+#Scale the data for glmmTMB analysis - can ignore NAs introduced by coersion warning # nolint
+dat_scaled <- dat %>%
+  rename("ratio" = "ratio_ave") %>%
+  mutate(hits = case_when(
+    hits == "<1" ~ 0,
+    TRUE ~ as.numeric(hits)
+  )) %>%
+  mutate(across(
+    .cols = c("hits", "ratio", "CCVI", "pct_rural", "rep"),
+    scale,
+    .names = "{.col}_scaled"
+  ))
+```
+
+
+
+```{r theme heatmap}
+theme_hm<-function(){
+    theme_minimal() %+replace%
+      theme(
+  axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+  axis.text.y = element_text(size = 7.5),
+  axis.ticks = element_blank(), 
+  legend.background = element_blank(), 
+  legend.key = element_blank(), 
+  panel.background = element_blank(),
+  panel.border = element_blank(), 
+  strip.background = element_blank(), 
+  plot.background = element_blank(), 
+  complete = TRUE)
+}
+```
+
+```{r figure_2, echo = FALSE}
+require(geofacet) #Making facet plot in US shape
+require(ggpubfigs) #Colorblind friendly palette
+require(ggstream)
+require(lubridate)
+require(tsibble)
+require(cowplot)
+
+plot_dat<-bind_rows(gst %>% 
+                      mutate(source_data = "GST",
+                             date = as.Date(date),
+                             year = as.numeric(year),
+                             week = as.numeric(week),
+                             hits = case_when(hits == "<1" ~ 0,
+                                              TRUE ~ as.numeric(hits)),
+                             hits = as.numeric(hits)) %>% 
+                      select(c("date", "value_n" = "hits", "treatment" = "keyword", 
+                               "state" = "geo", "year", "week", "source_data")),
+                    mc_ave %>% 
+                      mutate(source_data = "MC",
+                             date = as.Date(date),
+                             year = as.numeric(year),
+                             week = as.numeric(week),
+                             ratio_ave = as.numeric(ratio_ave)) %>% 
+                      select(c("date", "value_n" = "ratio_ave", "treatment" = "keyword", 
+                               "state" = "geo", "year", "week", "source_data"))) 
+
+plot_dat %<>% 
+  group_by(source_data, treatment) %>% 
+  mutate(val_scale = scale(value_n, center = FALSE, scale = sd(value_n, na.rm = TRUE)),
+         state = str_sub(state, start = 4, end = 5)) %>% 
+  ungroup() %>%
+  group_by(source_data, treatment, state, year, week) %>% 
+  slice(1) %>% 
+  filter(year %in% c(2020, 2021, 2022)) %>% 
+  mutate(week_year = tsibble::yearweek(date)) %>% 
+  ungroup() %>%
+  arrange(source_data, treatment, state, year, week) %>% 
+  group_by(source_data, treatment, state) %>% 
+  mutate(week_cont = row_number()) %>%
+  mutate(Time = as.character(tsibble::yearmonth(date)))
+
+labs <- c(
+  "2020 Jan", "2020 Apr", "2020 Jul", "2020 Oct", 
+  "2021 Jan", "2021 Apr", "2021 Jul", "2021 Oct", 
+  "2022 Jan", "2022 Apr", "2022 Jul", "2022 Oct"
+)
+
+#Heat maps
+gst_hm <- plot_dat %>%
+  filter(source_data == "GST") %>%
+  ggplot(aes(x = week_cont, y = state, colour = val_scale, fill = val_scale)) +
+  geom_tile(linewidth = 1, width = 1) +
+  scale_fill_viridis_c(option = "C", aesthetics = c("colour", "fill"), name = "Search interest") +
+  scale_x_continuous(
+    breaks = c(
+      1, 14, 27, 40,
+      53, 66, 79, 92,
+      105, 118, 131, 144
+    ),
+    labels = labs,
+    name = "Month"
+    ) +
+  scale_y_discrete(limits = rev, name = "State") +
+  coord_cartesian(expand = FALSE) +
+  theme_hm() +
+  facet_wrap(~treatment, ncol = 3)
+
+mc_hm <- plot_dat %>%
+  filter(source_data == "MC") %>%
+   ggplot(aes(x = week_cont, y = state, colour = val_scale, fill = val_scale)) +
+     geom_tile(linewidth = 1, width = 1) +
+     scale_fill_viridis_c(option = "D", aesthetics = c("colour", "fill"), name = "Media coverage") +
+     scale_x_continuous(
+       breaks = c(
+         1, 14, 27, 40,
+         53, 66, 79, 92,
+         105, 118, 131, 144
+       ),
+       labels = labs,
+       name = "Month"
+            ) +
+     scale_y_discrete(limits = rev, name = "State") +
+     coord_cartesian(expand = FALSE) +
+     theme_hm() +
+     facet_wrap(~treatment, ncol = 3)
+
+cowplot::plot_grid(
+  gst_hm +
+    theme(
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.x = element_blank(),
+      strip.text.x = element_text(size = 10)
+    ),
+  mc_hm +
+    theme(strip.text.x = element_blank()),
+  nrow = 2, 
+  align = "v"
+)
+```
+
+
+```{r model}
+library(glmmTMB)
+dat_scaled$treatment <- factor(dat_scaled$treatment,
+  levels = c("ivermectin", "hydroxychloroquine", "remdesivir")
+)
+
+#FINAL MODEL - outcome: GST (hits); exposure: MediaCloud (ratio_scaled)
+r_all_s <- glmmTMB(hits ~ treatment * ratio_scaled + CCVI_scaled + pct_rural_scaled + rep_scaled + (1 | state),
+  ziformula = ~1,
+  data = dat_scaled,
+  family = nbinom2
+)
+tidy(r_all_s, conf.int = TRUE)
+
+```
+
+```{r contrasts and plots}
+library(emmeans)
+#From: https://cran.r-project.org/web/packages/emmeans/vignettes/interactions.html
+
+emmeans(r_all_s, pairwise ~  treatment | ratio_scaled) #This works! Estimating marginal means
+
+# $emmeans
+# ratio_scaled = 0.0000000000000000172:
+#  treatment          emmean     SE  df asymp.LCL asymp.UCL
+#  ivermectin          1.989 0.0641 Inf     1.864      2.11
+#  hydroxychloroquine  0.968 0.0691 Inf     0.832      1.10
+#  remdesivir          1.635 0.0721 Inf     1.494      1.78
+
+# Results are given on the log (not the response) scale.
+# Confidence level used: 0.95
+
+# $contrasts
+# ratio_scaled = 0.0000000000000000172:
+#  contrast                        estimate     SE  df z.ratio p.value
+#  ivermectin - hydroxychloroquine    1.021 0.0309 Inf  33.065  <.0001
+#  ivermectin - remdesivir            0.354 0.0368 Inf   9.611  <.0001
+#  hydroxychloroquine - remdesivir   -0.667 0.0320 Inf -20.886  <.0001
+
+# Results are given on the log (not the response) scale.
+# P value adjustment: tukey method for comparing a family of 3 estimates
+
+
+emtrends(r_all_s, pairwise ~ treatment, var = "ratio_scaled") #Estimating and comparing slopes - demonstrates that HCQ and REM are significantly different
+# $emtrends
+#  treatment          ratio_scaled.trend     SE  df asymp.LCL asymp.UCL
+#  ivermectin                      0.969 0.0308 Inf     0.908     1.029
+#  hydroxychloroquine              0.737 0.0210 Inf     0.696     0.778
+#  remdesivir                      0.398 0.0207 Inf     0.358     0.439
+
+# Confidence level used: 0.95
+
+# $contrasts
+#  contrast                        estimate     SE  df z.ratio p.value
+#  ivermectin - hydroxychloroquine    0.231 0.0365 Inf   6.335  <.0001
+#  ivermectin - remdesivir            0.570 0.0364 Inf  15.672  <.0001
+#  hydroxychloroquine - remdesivir    0.339 0.0278 Inf  12.175  <.0001
+
+# P value adjustment: tukey method for comparing a family of 3 estimates
+
+```
+{r figure_3}
+#Figure 3 plot
+# From: https://cehs-research.github.io/eBook_regression/interactions-example.html
+p <- r_all_s %>%
+  interactions::interact_plot(
+    pred = ratio_scaled,
+    modx = treatment,
+    interval = TRUE,
+    int.type = "confidence",
+outcome.scale = "link",
+vary.lty = FALSE,
+legend.main = "Treatment"
+  )
+
+p +
+  labs(x = "Media Coverage", y = "Search Interest") +
+  theme_bw() +
+  scale_linetype(guide = "none")
+
+```
+
+
+
