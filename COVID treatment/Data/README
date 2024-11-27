@@ -1,0 +1,17 @@
+Data files:
+
+1. State-level Google Search Trends
+-GST_ALL_STATES_hydroxychloroquine
+-GST_ALL_STATES_ivermectin
+-GST_ALL_STATES_remdesivir
+
+2. State-level MediaCloud data
+- MC_ALL_STATES_hydroxychloroquine
+- MC_ALL_STATES_ivermectin
+- MC_ALL_STATES_remdesivir
+
+3. State-level covariates
+- state_covariates
+
+*Data for national GST anomaly analysis forthcoming
+
